@@ -1,0 +1,614 @@
+{
+  "name": "Free Video Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Video Generator",
+        "formDescription": "Make your own short video",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Topic",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Scenes",
+              "fieldType": "number",
+              "placeholder": "5"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c3939b8b-b8e2-40e8-8e56-5a27413e5e66",
+      "name": "On form submission",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -480,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "YOUR_GEMINI_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ systemInstruction: { parts: [{ text: 'You are a video script planner inside an automation workflow. Turn the topic into a short video plan. Return ONLY valid JSON with this shape: an object with a key title (string) and a key scenes (array). Each scene object has the keys narration (string), search_keyword (string) and duration_seconds (number). Rules: create exactly the requested number of scenes. Narration is 15 to 25 words per scene, simple spoken English, no emojis, no stage directions, no quotation marks. Scene 1 is a strong hook and the last scene is a short call to action. search_keyword is 2 to 3 plain English words describing concrete footage that exists on stock video sites, for example ocean waves sunset. Never use abstract keywords. Output no markdown and no commentary.' }] }, contents: [{ role: 'user', parts: [{ text: 'Topic: ' + $json.Topic + '. Number of scenes: ' + ($json.Scenes || 5) }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.7 } }) }}",
+        "options": {}
+      },
+      "id": "592f89d3-eb0d-477b-9699-5669c77b1edf",
+      "name": "Gemini Script",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        32
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const parts = $input.first().json.candidates[0].content.parts;\nconst raw = parts.map(p => p.text || '').join('');\nlet plan;\ntry { plan = JSON.parse(raw.replace(/```json|```/g, '').trim()); } catch (e) { throw new Error('Gemini did not return valid JSON: ' + raw.slice(0, 300)); }\nconst runId = 'v' + Date.now();\nreturn plan.scenes.map((s, i) => ({json:{title:plan.title,run_id:runId,scene:i+1,narration:s.narration,search_keyword:s.search_keyword,duration_seconds:Number(s.duration_seconds)||5}}));"
+      },
+      "id": "84fce112-cfd7-4b02-bade-305f01b4f323",
+      "name": "Parse Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.coverr.co/videos",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "YOUR_COVERR_API_KEY"
+            },
+            {
+              "name": "query",
+              "value": "={{ $json.search_keyword.split(' ').slice(-1)[0] }}"
+            },
+            {
+              "name": "page_size",
+              "value": "3"
+            },
+            {
+              "name": "urls",
+              "value": "true"
+            },
+            {
+              "name": "sort",
+              "value": "popular"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "6dd033e9-c326-4946-a352-6ba9d59b3d4b",
+      "name": "Coverr Video Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        256,
+        32
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const scenes = $('Parse Script').all().map(x => x.json);\nconst results = $input.all().map(x => x.json);\nconst urlOf = h => {\n  const u = h?.urls || {};\n  const candidates = [u.mp4, u.mp4_preview, u.mp4_download, u.url, h?.video_url, h?.videoUrl, h?.download_url, h?.downloadUrl, h?.url];\n  return candidates.find(v => typeof v === 'string' && /^https?:\\/\\//i.test(v)) || null;\n};\nconst available = [];\nfor (const result of results) {\n  const hits = Array.isArray(result.hits) ? result.hits : Array.isArray(result.videos) ? result.videos : Array.isArray(result.data) ? result.data : [];\n  for (const h of hits) {\n    const url = urlOf(h);\n    if (url && !available.some(v => v.url === url)) available.push({url, title: h.title || h.name || 'Stock footage'});\n  }\n}\nif (!available.length) {\n  const searched = results.map(r => r.query || r.params || '').filter(Boolean).join('; ');\n  throw new Error('Coverr returned zero free video results for the broader searches. Check the Coverr API key/plan and endpoint; Pick Clip cannot create valid footage URLs without search results. Searches: ' + searched.slice(0, 300));\n}\nconst used = new Set();\nreturn scenes.map((s, i) => {\n  const ownResult = results[i] || {};\n  const ownHits = Array.isArray(ownResult.hits) ? ownResult.hits : Array.isArray(ownResult.videos) ? ownResult.videos : Array.isArray(ownResult.data) ? ownResult.data : [];\n  let pick = ownHits.map(h => ({url: urlOf(h), title: h.title || h.name || 'Stock footage'})).find(h => h.url && !used.has(h.url));\n  if (!pick) pick = available.find(h => !used.has(h.url));\n  if (!pick) pick = available[i % available.length];\n  used.add(pick.url);\n  return {json: {...s, clip_url: pick.url, clip_title: pick.title, clip_fallback: !ownHits.some(h => urlOf(h) === pick.url)}};\n});"
+      },
+      "id": "09724a3f-e653-4341-a715-073665d789fb",
+      "name": "Pick Clip",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const scenes = $input.all().map(item => item.json);\nif (!scenes.length) throw new Error('No scenes were returned by the footage search.');\nconst clips=[]; let start=0;\nfor (const s of scenes) { const words=String(s.narration||'').trim().split(/\\s+/).filter(Boolean).length; const duration=Math.max(Number(s.duration_seconds)||5,words/2.5); if(!s.clip_url) throw new Error('Missing footage URL for scene '+s.scene); clips.push({asset:{type:'video',src:s.clip_url,volume:0},start,length:duration,fit:'cover'}); start+=duration; }\nreturn [{json:{title:scenes[0].title,narration:scenes.map(s=>s.narration).join(' '),clips,duration_seconds:start}}];"
+      },
+      "id": "8e026bfa-52c3-46cb-8e0b-37f15ff88d6c",
+      "name": "Collect Clips",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "YOUR_GEMINI_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ text: 'Read this narration naturally, with clear pacing and an engaging tone. Narration: ' + $('Collect Clips').first().json.narration }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "4b752c1c-c6de-4438-a889-8a325b5eb3f9",
+      "name": "Gemini TTS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        976,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "candidates[0].content.parts[0].inlineData.data",
+        "options": {
+          "fileName": "voiceover.wav"
+        }
+      },
+      "id": "c4cf0b37-29ea-40d5-85f1-3cadaf1c4f8d",
+      "name": "Convert Voiceover to File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.2,
+      "position": [
+        1216,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.shotstack.io/ingest/stage/upload",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "062905ce-fd23-4a54-ac6c-23342a88903a",
+      "name": "Request Audio Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1456,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.data.attributes.url }}",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "4797bfbf-8a4c-41d9-a4ea-5c240b12def5",
+      "name": "Upload Voiceover",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1696,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 20
+      },
+      "id": "98d0e758-18eb-4dce-8deb-51c574da5e47",
+      "name": "Wait for Audio Ingest",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1936,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.shotstack.io/ingest/stage/sources/' + $('Request Audio Upload').first().json.data.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "dff91a36-047f-4a84-9313-f71695aa0a32",
+      "name": "Check Audio Source",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2176,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.shotstack.io/edit/stage/render",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ timeline: { background: '#000000', tracks: [{ clips: $('Collect Clips').first().json.clips }, { clips: [{ asset: { type: 'audio', src: $('Check Audio Source').first().json.data.attributes.source, volume: 1 }, start: 0, length: $('Collect Clips').first().json.duration_seconds }] }] }, output: { format: 'mp4', resolution: 'hd', aspectRatio: '16:9' } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "cd28f415-ec98-4eb6-ba45-7ab017193783",
+      "name": "Render Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2416,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 30
+      },
+      "id": "c3ddb130-1f74-418b-94c1-bdc09680ad4f",
+      "name": "Wait for Render",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2656,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.shotstack.io/edit/stage/render/' + ($('Render Video').first().json.response?.id || $('Render Video').first().json.id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "8f76eecc-6b10-41c3-b6ed-4d883b86281c",
+      "name": "Check Render Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2896,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const root = $input.first().json || {};\n// Shotstack's HTTP response wraps render metadata in root.response. Its nested\n// response.data contains the timeline, not the render status or output URL.\nconst candidates = [root.response, root.data, root.response?.data, root];\nconst d = candidates.find(x => x && typeof x === 'object' && (x.status || x.url || x.id)) || root.response || root.data || root;\nconst status = d.status || d.attributes?.status || root.status || 'unknown';\nconst url = d.url || d.attributes?.url || d.output?.url || root.response?.url || root.url || null;\nconst renderId = d.id || d.attributes?.id || root.response?.id || root.id || null;\nreturn [{json:{status,video_url:url,render_id:renderId,message:url ? 'Video rendered successfully. Open video_url to watch or download it.' : 'Render is not complete yet. Wait and check the render status again.',title:$('Collect Clips').first().json.title}}];"
+      },
+      "id": "edffbae8-f74c-4c79-993b-f33242d8e3f9",
+      "name": "Return Video Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3136,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "5e83fb05-4f65-4a23-9f33-a9ca39d5cedf",
+      "name": "Merge Audio and Upload Ticket",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1584,
+        432
+      ]
+    }
+  ],
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Gemini Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Script": {
+      "main": [
+        [
+          {
+            "node": "Parse Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Script": {
+      "main": [
+        [
+          {
+            "node": "Coverr Video Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Clip": {
+      "main": [
+        [
+          {
+            "node": "Collect Clips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Clips": {
+      "main": [
+        [
+          {
+            "node": "Gemini TTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini TTS": {
+      "main": [
+        [
+          {
+            "node": "Convert Voiceover to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert Voiceover to File": {
+      "main": [
+        [
+          {
+            "node": "Request Audio Upload",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Audio and Upload Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Voiceover": {
+      "main": [
+        [
+          {
+            "node": "Wait for Audio Ingest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Audio Ingest": {
+      "main": [
+        [
+          {
+            "node": "Check Audio Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Audio Source": {
+      "main": [
+        [
+          {
+            "node": "Render Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Video": {
+      "main": [
+        [
+          {
+            "node": "Wait for Render",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Render": {
+      "main": [
+        [
+          {
+            "node": "Check Render Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Render Status": {
+      "main": [
+        [
+          {
+            "node": "Return Video Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coverr Video Search": {
+      "main": [
+        [
+          {
+            "node": "Pick Clip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Audio Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge Audio and Upload Ticket",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Audio and Upload Ticket": {
+      "main": [
+        [
+          {
+            "node": "Upload Voiceover",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
